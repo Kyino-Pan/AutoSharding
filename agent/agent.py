@@ -80,20 +80,7 @@ class DDPGAgent:
         # Clip actions to [0,1]
         action_vectors = torch.clamp(action_vectors, 0.0, 1.0)
 
-        # Flatten all action vectors into a single migration matrix
-        # Create a k x k migration matrix
-        migration_matrix = np.zeros((SHARD_AMOUNT, SHARD_AMOUNT), dtype=np.float32)
-
-        for acc_index, acc in enumerate(accounts_ids):
-            action_vector = action_vectors[acc_index].cpu().numpy()  # (8,)
-            from_shard = _get_account_shard(acc, accounts_info)  # 获取账户的当前分片
-            for to_shard in range(SHARD_AMOUNT):
-                migration_matrix[from_shard, to_shard] += action_vector[to_shard]
-
-        # Flatten the migration matrix to form the final action vector
-        final_action_vector = migration_matrix.flatten()  # (64,)
-
-        return final_action_vector, accounts_ids
+        return action_vectors, accounts_ids
 
     def reset_noise(self):
         self.noise.reset()
@@ -133,7 +120,7 @@ class DDPGAgent:
             # Assemble migration matrix
             migration_matrix = np.zeros((SHARD_AMOUNT, SHARD_AMOUNT), dtype=np.float32)
             for j, acc in enumerate(account_ids):
-                from_shard = _get_account_shard(acc, accounts_info)
+                from_shard = get_account_shard(acc, accounts_info)
                 for k in range(SHARD_AMOUNT):
                     migration_matrix[from_shard, k] += target_action_vectors_np[j, k]
 
@@ -184,7 +171,7 @@ class DDPGAgent:
             # 将每个账户的动作累加到对应的from_shard行中
             # action_vectors[j,:] 为账户 j 对应的(8,)动作向量
             for j, acc in enumerate(account_ids):
-                from_shard = _get_account_shard(acc, accounts_info)
+                from_shard = get_account_shard(acc, accounts_info)
                 # 将action_vectors[j,:]加到migration_matrix[from_shard,:]上
                 migration_matrix[from_shard, :] += action_vectors[j, :]
 
@@ -295,7 +282,7 @@ def _compute_n(accounts_info):
     # If fewer accounts, the remaining rows stay zero (already initialized)
     return n, account_ids  # n: a x k, account_ids: list of a accounts
 
-def _get_account_shard(account_id, accounts_info):
+def get_account_shard(account_id, accounts_info):
     # Helper method to get the shard of a given account
     if account_id in accounts_info:
         return accounts_info[account_id]["shard"]
