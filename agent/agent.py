@@ -9,10 +9,11 @@ import numpy as np
 from agent.network import Actor, Critic
 from agent.replay_buffer import ReplayBuffer
 from config import (
-    SHARD_AMOUNT, GAMMA, TAU, BUFFER_CAPACITY, BATCH_SIZE, LEARNING_RATE,TOP_ACCOUNTS_PER_SHARD
+    SHARD_AMOUNT, GAMMA, TAU, BUFFER_CAPACITY, BATCH_SIZE, LEARNING_RATE, TOP_ACCOUNTS_PER_SHARD
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class DDPGAgent:
     def __init__(self, state_dim, action_dim, hidden_dim=256):
@@ -26,7 +27,7 @@ class DDPGAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LEARNING_RATE)
 
         # Critic Network
-        self.critic = Critic(state_dim, action_dim).to(DEVICE)
+        self.critic = Critic(state_dim, action_dim, ).to(DEVICE)
         self.target_critic = Critic(state_dim, action_dim).to(DEVICE)
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LEARNING_RATE)
@@ -35,15 +36,13 @@ class DDPGAgent:
         self.replay_buffer = ReplayBuffer(capacity=BUFFER_CAPACITY)
 
         # Exploration noise
-        self.noise = OUNoise(action_dim*SHARD_AMOUNT*TOP_ACCOUNTS_PER_SHARD)
+        self.noise = OUNoise(action_dim * SHARD_AMOUNT * TOP_ACCOUNTS_PER_SHARD)
 
-    def info_to_feature(self,state, accounts_info):
-
+    def info_to_feature(self, state, accounts_info):
         m = _compute_m(state)
         # Compute n and get account_ids with fixed number
         n, account_ids = _compute_n(accounts_info)
         a = n.shape[0]
-
         if a == 0:
             # No accounts, no migration
             return np.zeros(self.action_dim, dtype=np.float32)
@@ -59,11 +58,10 @@ class DDPGAgent:
             fs.append(account_vec)
         fs = np.array(fs, dtype=np.float32)
         fs = torch.tensor(fs, dtype=torch.float32, device=DEVICE)  # (a, 16)
-        return fs,account_ids
+        return fs, account_ids
 
-    def select_action(self, state, accounts_info, noise=True):
+    def select_action(self, actor_features, noise=True):
         # Compute m
-        actor_features,accounts_ids = self.info_to_feature(state,accounts_info)
         a = actor_features.shape[0]
         # Pass each account's feature through Actor network to get action vectors
         self.actor.eval()
@@ -80,7 +78,7 @@ class DDPGAgent:
         # Clip actions to [0,1]
         action_vectors = torch.clamp(action_vectors, 0.0, 1.0)
 
-        return action_vectors, accounts_ids
+        return action_vectors
 
     def reset_noise(self):
         self.noise.reset()
@@ -91,8 +89,8 @@ class DDPGAgent:
         if len(self.replay_buffer) < BATCH_SIZE:
             return
         # Sample a batch from replay buffer
-        state_batch, action_batch, reward_batch, next_state_batch, done_batch, accounts_info_batch = self.replay_buffer.sample(
-            BATCH_SIZE)
+        (state_batch, action_batch, reward_batch,
+         next_state_batch, done_batch) = self.replay_buffer.sample(BATCH_SIZE)
         # Move to DEVICE
         state_batch = state_batch.to(DEVICE)
         action_batch = action_batch.to(DEVICE)
@@ -103,33 +101,16 @@ class DDPGAgent:
         # Compute target actions for the batch
         target_actions = []
         for i in range(BATCH_SIZE):
-            next_state = next_state_batch[i].cpu().numpy()
-            accounts_info = accounts_info_batch[i]
-            critic_features, account_ids = self.info_to_feature(next_state,accounts_info)
-
+            feature = state_batch[i]
             # Pass through target_actor to get action vectors
             with torch.no_grad():
-                target_action_vectors = self.target_actor(critic_features)  # (a, 8)
-
+                target_action_vectors = self.target_actor(feature)  # (a, 8)
             # Clip actions to [0,1]
             target_action_vectors = torch.clamp(target_action_vectors, 0.0, 1.0)
-
             # Convert to numpy
-            target_action_vectors_np = target_action_vectors.cpu().numpy()  # (a, 8)
-
-            # Assemble migration matrix
-            migration_matrix = np.zeros((SHARD_AMOUNT, SHARD_AMOUNT), dtype=np.float32)
-            for j, acc in enumerate(account_ids):
-                from_shard = get_account_shard(acc, accounts_info)
-                for k in range(SHARD_AMOUNT):
-                    migration_matrix[from_shard, k] += target_action_vectors_np[j, k]
-
-            # Flatten to get target action
-            target_action = migration_matrix.flatten()  # (64,)
-
-            target_actions.append(target_action)
+            target_actions.append(target_action_vectors.cpu().numpy())
         # Convert target_actions to tensor
-        target_actions = torch.tensor(target_actions, dtype=torch.float32, device=DEVICE)  # (batch_size, 64)
+        target_actions = torch.tensor(target_actions, dtype=torch.float32, device=DEVICE)
 
         # Compute target Q-values
         with torch.no_grad():
@@ -148,36 +129,13 @@ class DDPGAgent:
         self.critic_optimizer.step()
 
         # Compute Actor loss
-        # 对于每个样本，从 state_batch 和 accounts_info_batch 中获取特征，不使用 torch.no_grad()
         actor_actions = []
         for i in range(BATCH_SIZE):
-            # 从当前样本获取状态和账户信息
-            state_np = state_batch[i].cpu().numpy()
-            accounts_info = accounts_info_batch[i]
-
-            # 使用 info_to_feature 方法获取 (critic_features, account_ids)
-            # 假设 info_to_feature(state, accounts_info) 返回 (critic_features, account_ids)
-            critic_features, account_ids = self.info_to_feature(state_np, accounts_info)
-            # critic_features: (a,16) 张量, a表示账户数
-            # account_ids: list of accounts
-
+            feature_np = state_batch[i]
             # 不使用 torch.no_grad()，以便保留梯度
-            action_vectors = self.actor(critic_features)  # (a, 8)
-            action_vectors = torch.clamp(action_vectors, 0.0, 1.0)
-
-            # 在 torch 中组装迁移矩阵
-            migration_matrix = torch.zeros((SHARD_AMOUNT, SHARD_AMOUNT), dtype=torch.float32, device=DEVICE)
-
-            # 将每个账户的动作累加到对应的from_shard行中
-            # action_vectors[j,:] 为账户 j 对应的(8,)动作向量
-            for j, acc in enumerate(account_ids):
-                from_shard = get_account_shard(acc, accounts_info)
-                # 将action_vectors[j,:]加到migration_matrix[from_shard,:]上
-                migration_matrix[from_shard, :] += action_vectors[j, :]
-
-            # 展平得到最终动作向量 (64,)
-            action = migration_matrix.view(-1)  # (64,)
-            actor_actions.append(action)
+            action_vector = self.actor(feature_np)  # (a, 8)
+            action_vector = torch.clamp(action_vector, 0.0, 1.0)
+            actor_actions.append(action_vector)
 
         # Convert actor_actions to tensor
         actor_actions = torch.stack(actor_actions, dim=0)  # (batch_size, 64)
@@ -198,12 +156,12 @@ class DDPGAgent:
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
 
-    def store_transition(self, state, action, reward, next_state, done, accounts_info):
+    def store_transition(self, state, action, reward, next_state, done):
         """
         存储转移，包括 accounts_info
         """
         # action is the flattened k*k migration vector
-        self.replay_buffer.push(state, action, reward, next_state, done, accounts_info)
+        self.replay_buffer.push(state, action, reward, next_state, done)
 
 
 # Ornstein-Uhlenbeck process for exploration noise
@@ -222,6 +180,7 @@ class OUNoise:
         dx = self.theta * (self.mu - self.state) + self.sigma * np.random.randn(self.size)
         self.state += dx
         return self.state
+
 
 def _compute_m(state):
     # state is k*k flattened matrix
@@ -251,7 +210,7 @@ def _compute_n(accounts_info):
             continue
         # Sort by cross-shard ratio
         sorted_by_ratio = sorted(shard_accounts.items(), key=lambda item:
-                                 (item[1]["cross_shard_count"] / (item[1]["cross_shard_count"] + item[1]["intra_shard_count"] + 1e-6)),
+        (item[1]["cross_shard_count"] / (item[1]["cross_shard_count"] + item[1]["intra_shard_count"] + 1e-6)),
                                  reverse=True)
         top_ratio_accounts = [acc for acc, info in sorted_by_ratio[:TOP_ACCOUNTS_PER_SHARD]]
         # Select up to TOP_ACCOUNTS_PER_SHARD
@@ -281,6 +240,7 @@ def _compute_n(accounts_info):
 
     # If fewer accounts, the remaining rows stay zero (already initialized)
     return n, account_ids  # n: a x k, account_ids: list of a accounts
+
 
 def get_account_shard(account_id, accounts_info):
     # Helper method to get the shard of a given account

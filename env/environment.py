@@ -8,7 +8,7 @@ import random
 import config
 from config import (
     SHARD_AMOUNT, STATE_WINDOW, DATA_FILE, SEED, ACTIVATE_THRESHOLD,
-    MIGRATION_COST, INCENTIVE, PENALTY_COEFF, REWARD_DELAY, BLOCK_PER_DAY
+    MIGRATION_COST, PENALTY_COEFF, REWARD_DELAY, BLOCK_PER_DAY
 )
 
 
@@ -34,6 +34,7 @@ class EthEnvironment:
 
         # 当前块编号
         self.current_block_number = 0
+        self.act_at_block_num = 0
 
         # 记录上一次发起迁移提案的块编号
         self.last_proposal_block_num = -999999999
@@ -60,10 +61,12 @@ class EthEnvironment:
             self.compare_distributions.append(zero_matrix)
 
         self.current_block_number = 0
+        self.act_at_block_num = 0
         self.n = 0
         self.prev_cross_shard_sum = 0.0
         self.prev_acc_info = {}
         self.accounts_info = {}
+        self.step([])
         self.step([])
         self.last_proposal_block_num = self.current_block_number
         for i in range(self.window):
@@ -176,8 +179,9 @@ class EthEnvironment:
             interval = 1
 
         penalty = PENALTY_COEFF * (1.0 / interval)  # REWARD_DELAY ?= 1024
-        incentive = max(0,interval-ACTIVATE_THRESHOLD) / (2 * BLOCK_PER_DAY)    # 鼓励发起迁移proposal
+        incentive = min(cost, max(0,interval-ACTIVATE_THRESHOLD) / (2 * BLOCK_PER_DAY))    # 鼓励发起迁移proposal
         reward = 32 * improvement - cost - penalty + incentive
+        print(improvement,cost,penalty,incentive)
         # 为简单起见，我们假设一次step只处理一个到期动作（取第一个）
         self.unrewarded_action = []
         self.prev_acc_info = {}

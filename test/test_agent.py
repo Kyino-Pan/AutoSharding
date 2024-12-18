@@ -55,7 +55,7 @@ class TestDDPGAgent(unittest.TestCase):
         state = self.env.reset()
         self.agent.reset_noise()
         for _ in range(n_steps):
-            action = self.agent.select_action(state, self.env.accounts_info, noise=False)
+            action = self.agent.select_action(state, noise=False)
             # 创建虚拟的下一个状态和奖励
             next_state = state.copy()
             reward = 1.0
