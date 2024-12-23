@@ -88,48 +88,67 @@ class EthEnvironment:
         self.n += 1
         return shard
 
-    def _assign_shards(self, from_acc, to_acc, acc_info):
+    def _assign_shards(self, from_acc, to_acc, acc_info, together=False):
         from_known = (from_acc in acc_info)
         to_known = (to_acc in acc_info)
-
-        if not from_known and not to_known:
-            shard_f = self._assign_new_shard()
-            shard_t = self._assign_new_shard()
-            acc_info[from_acc] = {
-                "shard": shard_f,
-                "last_active_block": self.current_block_number,
-                "cross_shard_count": 0,
-                "intra_shard_count": 0,
-                "cross_shard_distribution": {}
-            }
-            acc_info[to_acc] = {
-                "shard": shard_t,
-                "last_active_block": self.current_block_number,
-                "cross_shard_count": 0,
-                "intra_shard_count": 0,
-                "cross_shard_distribution": {}
-            }
-        elif from_known and not to_known:
-            shard_f = acc_info[from_acc]["shard"]
-            acc_info[to_acc] = {
-                "shard": shard_f,
-                "last_active_block": self.current_block_number,
-                "cross_shard_count": 0,
-                "intra_shard_count": 0,
-                "cross_shard_distribution": {}
-            }
-        elif to_known and not from_known:
-            shard_t = acc_info[to_acc]["shard"]
-            acc_info[from_acc] = {
-                "shard": shard_t,
-                "last_active_block": self.current_block_number,
-                "cross_shard_count": 0,
-                "intra_shard_count": 0,
-                "cross_shard_distribution": {}
-            }
+        if together:
+            if not from_known and not to_known:
+                shard_f = self._assign_new_shard()
+                shard_t = self._assign_new_shard()
+                acc_info[from_acc] = {
+                    "shard": shard_f,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
+                acc_info[to_acc] = {
+                    "shard": shard_t,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
+            elif from_known and not to_known:
+                shard_f = acc_info[from_acc]["shard"]
+                acc_info[to_acc] = {
+                    "shard": shard_f,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
+            elif to_known and not from_known:
+                shard_t = acc_info[to_acc]["shard"]
+                acc_info[from_acc] = {
+                    "shard": shard_t,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
+            else:
+                acc_info[from_acc]["last_active_block"] = self.current_block_number
+                acc_info[to_acc]["last_active_block"] = self.current_block_number
         else:
-            acc_info[from_acc]["last_active_block"] = self.current_block_number
-            acc_info[to_acc]["last_active_block"] = self.current_block_number
+            if not from_known:
+                shard_f = self._assign_new_shard()
+                acc_info[from_acc] = {
+                    "shard": shard_f,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
+            if not to_known:
+                shard_t = self._assign_new_shard()
+                acc_info[to_acc] = {
+                    "shard": shard_t,
+                    "last_active_block": self.current_block_number,
+                    "cross_shard_count": 0,
+                    "intra_shard_count": 0,
+                    "cross_shard_distribution": {}
+                }
         return acc_info[from_acc]["shard"], acc_info[to_acc]["shard"]
 
     def _update_accounts_info(self, from_acc, to_acc, from_shard, to_shard, acc_info, value=1):
@@ -153,41 +172,61 @@ class EthEnvironment:
             sum_matrix += dist
         cross_sum = 0.0
         intra_sum = 0.0
+        shards_dist = np.zeros(self.k, dtype=np.integer)
         for i in range(self.k):
             intra_sum += sum_matrix[i, i]
+            shards_dist[i] += sum_matrix[i, i]
             for j in range(self.k):
                 if i != j:
+                    shards_dist[i] += sum_matrix[i, j]
+                    shards_dist[j] += sum_matrix[i, j]
                     cross_sum += sum_matrix[i, j]
-        return intra_sum, cross_sum
+        return intra_sum, cross_sum, shards_dist
 
     def _compute_delayed_reward(self):
         # 检查pending_actions中是否有到期的动作
         # reward_delay后计算奖励 = 改善 - 成本 - 惩罚 + 激励
-        ready_actions = []
-        current_intra, current_cross = self._compute_tx_dist_(self.last_distributions)
-        current_ratio = current_cross / (current_intra + current_cross)
-        prev_intra, prev_cross = self._compute_tx_dist_(self.compare_distributions)
-        prev_ratio = prev_cross / (prev_cross + prev_intra)
+        current_intra, current_cross, current_dist = self._compute_tx_dist_(self.last_distributions)
+        current_ratio = current_intra / (current_intra + current_cross)
+        prev_intra, prev_cross, prev_dist = self._compute_tx_dist_(self.compare_distributions)
+        prev_ratio = prev_intra / (prev_cross + prev_intra)
+        # 评估current_dist
+        current_cov = np.std(current_dist) / np.mean(current_dist)
+        prev_cov = np.std(prev_dist) / np.mean(prev_dist)
+        print(f"\tCov Improve = {current_cov - prev_cov} {current_dist}")
         if prev_ratio >= current_ratio:  # 没迁移情况下的跨片交易比例更大
             improvement = (prev_cross - current_cross) / prev_cross
         else:
             improvement = -(prev_intra - current_intra) / prev_intra
+
+        cov_improvement = prev_cov - current_cov
+        if cov_improvement > 0:  # 如果cov更小了，说明分布更均匀了
+            improvement = improvement * (1 + cov_improvement)
+        else:
+            improvement = improvement * (1 + 100 * cov_improvement)
+
         cost = MIGRATION_COST * len(self.unrewarded_action)
         interval = (self.act_at_block_num - self.last_proposal_block_num)
         self.last_proposal_block_num = self.act_at_block_num
         if interval <= 0:
             interval = 1
-
         penalty = PENALTY_COEFF * (1.0 / interval)  # REWARD_DELAY ?= 1024
-        incentive = min(cost, max(0,interval-ACTIVATE_THRESHOLD) / (2 * BLOCK_PER_DAY))    # 鼓励发起迁移proposal
+        incentive = min(cost, max(0, interval - ACTIVATE_THRESHOLD) / (2 * BLOCK_PER_DAY))  # 鼓励发起迁移proposal
+
+        improvement -= 0.02
         reward = 32 * improvement - cost - penalty + incentive
-        print(improvement,cost,penalty,incentive)
+
+        print(
+            f"\t{reward}({improvement})\t {prev_intra}({prev_ratio * 100}%) ---> {current_intra}({current_ratio * 100}%),"
+            f" \tinterval = {interval}")
         # 为简单起见，我们假设一次step只处理一个到期动作（取第一个）
         self.unrewarded_action = []
         self.prev_acc_info = {}
+
         return reward
 
     def _read_next_block(self):
+
         # 读取下一块的全部交易
         try:
             first_row = next(self.reader)
@@ -213,16 +252,10 @@ class EthEnvironment:
 
         return transactions, current_block_num
 
-    # def _check_sum(self):
-    #     current_intra, current_cross = self._compute_tx_dist_(self.last_distributions)
-    #     prev_intra, prev_cross = self._compute_tx_dist_(self.compare_distributions)
-    #     if current_intra+current_cross != prev_intra+prev_cross:
-    #         print(self.current_block_number,prev_intra,prev_cross,current_intra,current_cross)
-
     def _read_and_process_block(self, migration):
         # 处理migration
         if migration:
-            print(f"Migration at block {self.current_block_number}")
+            # print(f"Migration at block {self.current_block_number}")
             self.unrewarded_action = migration
             self.prev_acc_info = copy.deepcopy(self.accounts_info)
             self.compare_distributions = copy.deepcopy(self.last_distributions)
@@ -264,7 +297,6 @@ class EthEnvironment:
                 from_shard, to_shard = self._assign_shards(from_acc, to_acc, self.prev_acc_info)
                 prev_distribution[from_shard][to_shard] += 1.0
                 self._update_accounts_info(from_acc, to_acc, from_shard, to_shard, self.prev_acc_info, value=1)
-                # self._check_sum()
 
         self.current_block_number = current_block_num
 
@@ -276,7 +308,7 @@ class EthEnvironment:
         done = False
         if migration:
             for i in range(REWARD_DELAY):
-                _, _, done = self.step([])
+                _, done = self._read_and_process_block([])
                 if done:
                     break
             delayed_reward = self._compute_delayed_reward()

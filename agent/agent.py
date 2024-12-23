@@ -46,7 +46,6 @@ class DDPGAgent:
         if a == 0:
             # No accounts, no migration
             return np.zeros(self.action_dim, dtype=np.float32)
-
         # Compute features: a x (k*2)
         fs = []
         for i in range(a):
